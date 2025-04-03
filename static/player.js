@@ -1,6 +1,7 @@
 import * as CANNON from '/dist/cannon-es.js';
 import * as THREE from '/static/three.module.min.js';
 import { PointerLockControlsCannon } from './js/PointerLockControlsCannon.js';
+import { MobileControlsCannon } from './js/MobileControlsCannon.js';
 import { CharacterManager } from './CharacterManager.js';
 import { PlayerShadow } from './PlayerShadow.js';
 
@@ -48,19 +49,33 @@ export class Player {
     this.isDead = false;
     this.deathY = -40; // Y position threshold for death
     this.respawnPosition = new THREE.Vector3(15, 30, 15); // Same as initial spawn position
+
+    this.isMobile = false; // Add mobile flag
+    this.mobileControls = null; // Add mobile controls reference
+    this.joystickAngle = 0; // Store joystick angle
+    this.joystickForce = 0; // Store joystick force
+    this.mobileRotationSpeed = 1.5; // Rotation speed multiplier for mobile
   }
 
   // Initialize the player physics, controls, and character
-  init() {
+  init(isMobile) {
+    this.isMobile = isMobile; // Store the flag
+
     this.createPlayerBody();
-    this.initPointerLock();
+    
+    // Conditionally initialize controls based on device type
+    if (this.isMobile) {
+      this.initMobileControls();
+    } else {
+      this.initPointerLock();
+    }
+
     this.setupShootingMechanism();
     this.initCharacter();
     this.initShadow(); 
-    this.setupKeyboardControls();
+    this.setupKeyboardControls(); // Keyboard controls might still be useful for debugging on mobile with connected keyboard
     
-    // Initialize from portal data if coming from a portal
-    this.initFromPortalData();
+    // Note: initFromPortalData is called separately from startGame in index.html now
   }
   
   // Method to initialize player from portal data (if available)
@@ -161,8 +176,8 @@ export class Player {
     });
     this.sphereBody.addShape(this.sphereShape);
     
-    // Start player higher above the terrain to prevent initial sinking
-    this.sphereBody.position.set(15, 30, 15); // Higher starting position
+    // Start player closer to the terrain Y offset (21) to reduce initial drop velocity
+    this.sphereBody.position.set(15, 23, 15); // Lower starting position (was Y=30)
     
     // Increased damping to prevent excessive sliding
     this.sphereBody.linearDamping = 0.6;  //0.95;
@@ -229,9 +244,74 @@ export class Player {
     });
   }
 
+  // Initialize mobile controls
+  initMobileControls() {
+    const joystickZone = document.getElementById('joystick-zone');
+    const jumpButton = document.getElementById('jump-button');
+
+    if (!joystickZone || !jumpButton) {
+      console.error("Player: Could not find joystick zone or jump button for mobile controls.");
+      return;
+    }
+
+    this.mobileControls = new MobileControlsCannon();
+    this.mobileControls.init(joystickZone, jumpButton);
+
+    // Listen for joystick events
+    this.mobileControls.addEventListener('joystickMove', (event) => {
+      const { angle, force, active } = event.data;
+      this.joystickAngle = angle;
+      this.joystickForce = force;
+      // Set movement flags based on joystick direction and force
+      const threshold = 0.1; // Deadzone
+      if (active && force > threshold) {
+        // Determine primary direction (forward/backward) based on angle
+        const angleDegrees = THREE.MathUtils.radToDeg(angle);
+        if (angleDegrees > 45 && angleDegrees < 135) {
+          this.moveForward = true; this.moveBackward = false; // Up
+        } else if (angleDegrees > 225 && angleDegrees < 315) {
+          this.moveForward = false; this.moveBackward = true; // Down
+        } else {
+          this.moveForward = false; this.moveBackward = false;
+        }
+        // Rotation is handled separately in update
+      } else {
+        this.moveForward = false;
+        this.moveBackward = false;
+        // Reset rotation impulse when stick returns to center
+      }
+    });
+
+    this.mobileControls.addEventListener('joystickEnd', () => {
+      this.joystickForce = 0;
+      this.moveForward = false;
+      this.moveBackward = false;
+      // Rotation stops implicitly as joystickForce becomes 0
+    });
+
+    // Listen for jump event
+    this.mobileControls.addEventListener('jumpPress', () => {
+      this.triggerJump();
+    });
+
+    console.log("Mobile controls initialized and listeners set up in Player.");
+  }
+
   // Set up keyboard controls for WASD movement
   setupKeyboardControls() {
     document.addEventListener('keydown', (event) => {
+      // Always allow debug keys
+      if (event.ctrlKey && (event.code === 'KeyD' || event.code === 'KeyP')) {
+         // Logic for debug keys is handled globally in index.html or elsewhere
+         return; 
+      }
+      
+      // Ignore gameplay keys if mobile controls are active
+      if (this.isMobile) {
+        return;
+      }
+
+      // Process gameplay keys only if not mobile
       switch (event.code) {
         case 'KeyW':
           this.moveForward = true;
@@ -261,6 +341,12 @@ export class Player {
     });
 
     document.addEventListener('keyup', (event) => {
+      // Ignore gameplay keys if mobile controls are active
+      if (this.isMobile) {
+        return;
+      }
+
+      // Process gameplay keys only if not mobile
       switch (event.code) {
         case 'KeyW':
           this.moveForward = false;
@@ -289,12 +375,15 @@ export class Player {
     const ballMaterial = new THREE.MeshLambertMaterial({ color: 0xdddddd });
     const shootVelocity = 15;
 
-    // Add click event listener for shooting
+    // Remove this listener - it causes errors on mobile as this.controls is null
+    // and the shooting logic is currently disabled anyway.
+    /*
     window.addEventListener('click', (event) => {
-      if (!this.controls.enabled) {
+      if (!this.controls || !this.controls.enabled) { // Check if controls exist first
         return;
       }
       return;  // pass shooting or throwing for now (implement later)
+      
       // Create ball physics body
       const ballBody = new CANNON.Body({ mass: 1 });
       ballBody.addShape(ballShape);
@@ -333,6 +422,7 @@ export class Player {
         this.scene.remove(oldMesh);
       }
     });
+    */
   }
 
   // Returns a vector pointing in the direction the camera is facing
@@ -429,9 +519,33 @@ checkGroundContact() {
 
   // Update method called on each animation frame
   update(dt, lightParams = null) {
-    // First update controls for camera rotation
+    // First update controls for camera rotation (desktop only)
     if (this.controls) {
-      this.controls.update(dt, true);  // Skip position update, we'll handle it separately
+      this.controls.update(dt, true);  // Skip position update, handled by camera orbit
+    }
+
+    // Handle Mobile Rotation based on joystick X-axis
+    if (this.isMobile && this.mobileControls && this.joystickForce > 0.1) {
+        // Calculate horizontal component from joystick angle and force
+        const angle = this.joystickAngle;
+        const force = this.joystickForce;
+        // Project force onto the horizontal axis (using cosine of angle relative to right direction)
+        // Angle 0 is right, PI/2 is up, PI is left, 3*PI/2 is down.
+        // Cosine gives projection onto horizontal (0 to PI is right side, PI to 2PI is left side)
+        const horizontalForce = Math.cos(angle) * force;
+
+        // Apply rotation to the character model based on horizontal force
+        if (this.characterManager && this.characterManager.character) {
+            // Negative rotation for clockwise (right stick)
+            // Positive rotation for counter-clockwise (left stick)
+            const rotationAmount = -horizontalForce * this.mobileRotationSpeed * dt;
+            this.characterManager.character.rotation.y += rotationAmount;
+            // Keep rotation within 0 to 2PI
+            this.characterManager.character.rotation.y %= (2 * Math.PI);
+             if (this.characterManager.character.rotation.y < 0) {
+                this.characterManager.character.rotation.y += (2 * Math.PI);
+            }
+        }
     }
 
     // Check ground contact
@@ -498,17 +612,45 @@ if (this.characterManager) {
   // with collision detection to prevent camera clipping through objects
 // Updated camera orbit method to account for player scale
 updateCameraOrbit(dt) {
-  if (!this.controls) return;
+  // Remove the guard that prevented mobile camera updates
+  // if (!this.controls) return; 
+
+  // Determine rotation based on device type
+  let yawRotation = 0;
+  let pitchRotation = 0.3; // Use positive pitch for high angle (was -0.2)
+  let playerScale = 1.0; // Default scale
+  const baseRadius = 0.57;
+
+  if (this.sphereShape) {
+      playerScale = this.sphereShape.radius / baseRadius;
+  }
+
+  if (!this.isMobile && this.controls) {
+    // Desktop: Get rotation from PointerLockControls
+    yawRotation = this.controls.getYawRotation();
+    pitchRotation = this.controls.getPitchRotation();
+    // Ensure pitch doesn't go too far up/down (can reuse clamp from PointerLockControlsCannon)
+    pitchRotation = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, pitchRotation));
+  } else if (this.isMobile && this.characterManager && this.characterManager.character) {
+    // Mobile: Get yaw from character model, use fixed pitch
+    // Add PI to align mobile character rotation with camera orbit calculation
+    yawRotation = this.characterManager.character.rotation.y + Math.PI; 
+    // Pitch is already set to the default fixed value (0.3)
+  } else {
+      // Fallback if controls or character aren't ready yet
+      // Use default rotations
+  }
   
   // Get player position (target to orbit around)
   const playerPos = this.sphereBody.position.clone();
   
-  // Get rotation angles from the controls
-  const yawRotation = this.controls.getYawRotation();
-  const pitchRotation = this.controls.getPitchRotation();
+  // Get rotation angles from the controls (Handled above)
+  // const yawRotation = this.controls.getYawRotation();
+  // const pitchRotation = this.controls.getPitchRotation();
   
-  // Calculate scale factor for camera adjustments
-  const scaleFactor = this.sphereShape.radius / 0.57; // 0.57 is the default radius
+  // Calculate scale factor for camera adjustments (Handled above)
+  // const scaleFactor = this.sphereShape.radius / 0.57; // 0.57 is the default radius
+  const scaleFactor = playerScale;
   
   // Set up base orbit distance - scale with player size
   const idealOrbitDistance = 6 * Math.max(1, scaleFactor * 0.7);
@@ -550,7 +692,13 @@ updateCameraOrbit(dt) {
   );
   
   // Set camera position
-  this.controls.getObject().position.copy(newCameraPos);
+  if (!this.isMobile && this.controls) {
+    // Desktop: Position the controls object (yawObject)
+    this.controls.getObject().position.copy(newCameraPos);
+  } else {
+    // Mobile: Position the camera directly
+    this.camera.position.copy(newCameraPos);
+  }
   
   // Calculate look target (slightly above player for better framing)
   const lookTarget = new THREE.Vector3();
@@ -624,17 +772,36 @@ updateCameraOrbit(dt) {
   
   // Get camera's forward direction (in world space, flattened to xz plane)
   getCameraDirection() {
-    // Get direction directly from controls
-    const direction = this.controls.getDirection().clone();
-    
-    // Project to XZ plane (flatten y component) and normalize
-    direction.y = 0;
-    direction.normalize();
-    
-    // Add isMoving flag for animation control
-    direction.isMoving = this.moveForward || this.moveBackward || this.moveLeft || this.moveRight;
-    
-    return direction;
+    if (this.isMobile) {
+       // On mobile, direction is based on character model's orientation
+        if (this.characterManager && this.characterManager.character) {
+            const direction = new THREE.Vector3(0, 0, 1); // Forward vector
+            direction.applyQuaternion(this.characterManager.character.quaternion); // Apply character's rotation
+            direction.y = 0;
+            direction.normalize();
+             // Add isMoving flag for animation control
+            direction.isMoving = this.moveForward || this.moveBackward;
+            return direction;
+        } else {
+            // Fallback if character not ready
+            const fallbackDir = new THREE.Vector3(0, 0, 1); 
+            fallbackDir.isMoving = this.moveForward || this.moveBackward;
+            return fallbackDir;
+        }
+    } else {
+       // Desktop: Use PointerLockControls direction
+        if (!this.controls) { // Fallback if controls aren't ready
+             const fallbackDir = new THREE.Vector3(0, 0, -1);
+             fallbackDir.isMoving = this.moveForward || this.moveBackward || this.moveLeft || this.moveRight;
+             return fallbackDir;
+        }
+       const direction = this.controls.getDirection().clone(); // Get from PointerLockControls
+        direction.y = 0;
+        direction.normalize();
+        // Add isMoving flag for animation control
+        direction.isMoving = this.moveForward || this.moveBackward || this.moveLeft || this.moveRight;
+        return direction;
+    }
   }
   
   // Get the movement direction based on current key presses and camera orientation
@@ -699,7 +866,6 @@ applyMovementForces() {
  const right = new THREE.Vector3(1, 0, 0);
  right.applyAxisAngle(new THREE.Vector3(0, 1, 0), characterRotation);
  right.y = 0;
- right.normalize();
  right.negate();
 
  // Calculate movement direction based on key states
@@ -1069,12 +1235,33 @@ respawn() {
   // Reset death state
   this.isDead = false;
   
-  // Request pointer lock again
+  // Request pointer lock again only for desktop
   setTimeout(() => {
-    if (this.controls) {
+    if (this.controls && !this.isMobile) { 
       this.controls.lock();
     }
   }, 100);
 }
 
+// Method to explicitly enable/disable player controls/activity
+setEnabled(enabled) {
+  this.enabled = enabled;
+  // If using PointerLockControls, sync its enabled state if it exists
+  if (this.controls) {
+    this.controls.enabled = enabled;
+  }
+  console.log(`Player enabled state set to: ${enabled}`);
+}
+
+// Trigger a jump action (used by both keyboard and mobile controls)
+triggerJump() {
+  console.log('Jump triggered - canJump:', this.canJump, 'isGrounded:', this.isGrounded);
+  if (this.canJump && this.isGrounded) { // Removed spacePressed check for mobile
+      console.log('Jumping!');
+      this.sphereBody.velocity.y = 20; // Apply vertical jump impulse
+      this.isJumping = true;
+      this.jumpStartTime = performance.now();
+      this.canJump = false;
+  }
+}
 }

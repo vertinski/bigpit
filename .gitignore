@@ -1,0 +1,10 @@
+# Ignore all MDC files
+*.mdc
+.cursor/
+
+# Ignore the .vscode directory
+.vscode/
+
+#other
+project_docs/
+TODO.md
