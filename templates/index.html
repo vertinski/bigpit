@@ -1,0 +1,710 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Big Pit Fun</title>
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0" />
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        font-family: system-ui, sans-serif;
+      }
+      #instructions {
+        position: fixed;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        background-color: rgba(0, 0, 0, 0.5);
+        color: #ffffff;
+        text-align: center;
+        cursor: pointer;
+      }
+      #instructions span {
+        font-size: 40px;
+      }
+      #loading {
+        position: fixed;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        background-color: rgba(0, 0, 0, 0.7);
+        color: #ffffff;
+        text-align: center;
+        z-index: 1000;
+      }
+      #loading span {
+        font-size: 24px;
+      }
+      #unmuteButton {
+        position: relative;
+        top: 10px;
+        left: 10px;
+        padding: 10px;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="loading">
+      <span>Let's Go!</span>
+    </div>
+    <div id="instructions" style="display: none;">
+      <span>
+        <img src="/assets/title_small.jpeg"/>
+      </span>
+      <span>Click anywhere to start!</span>
+      <br />
+      (W,A,S,D = Move, SPACE = Jump, MOUSE = Look, MUSHROOM = Eat!)
+      <br />
+      <br />
+      <button id="unmuteButton">SoundOn!</button>
+    </div>
+
+    <!-- Add a debug info panel -->
+    <div id="debug" style="position: fixed; bottom: 10px; left: 10px; color: white; background: rgba(0,0,0,0.5); padding: 10px; display: none;">
+      <div>Debug Info:</div>
+      <div id="debugInfo"></div>
+    </div>
+
+    <script type="module">
+      import * as THREE from '/static/three.module.min.js';
+      import Stats from '/static/Stats.module.js';
+      import { WorldManager } from '/static/world-terrain.js';
+      import { Player } from '/static/player.js';
+      import { GameObjects } from '/static/objects.js';
+
+      import { PhysicsDebugger } from '/static/PhysicsDebugger.js';
+
+
+      // Mushroom spawning variables
+      let lastMushroomSpawnTime = 0;
+      let nextMushroomSpawnInterval = 0;
+      let mushroomSystem = {
+        enabled: true,
+        minSpawnInterval: 5000,  // Minimum time between spawns (ms)
+        maxSpawnInterval: 15000, // Maximum time between spawns (ms)
+        spawnChance: 0.7         // Chance of spawning when interval is reached
+      };
+
+      let backgroundMusic;
+
+      //debug variable
+      let physicsDebugger;
+
+      // Three.js variables
+      let camera, scene, renderer, stats;
+
+      // Game managers
+      let worldManager, player, gameObjects;
+
+      // Time tracking
+      const timeStep = 1 / 60;
+      let lastCallTime = performance.now();
+
+      // DOM elements
+      const loading = document.getElementById('loading');
+
+      // Add debugging utilities
+      let debugEnabled = false;
+
+      // Toggle debug with 'D' key
+      window.addEventListener('keydown', (e) => {
+        if (e.code === 'KeyD' && e.ctrlKey) {
+          debugEnabled = !debugEnabled;
+          document.getElementById('debug').style.display = debugEnabled ? 'block' : 'none';
+        }
+
+        // Add new physics debugger toggle
+        if (e.code === 'KeyP' && e.ctrlKey) {
+          if (physicsDebugger) {
+            physicsDebugger.toggle();
+            console.log("Physics debug visualization:", physicsDebugger.enabled ? "enabled" : "disabled");
+          }
+        }
+      });
+
+      // Debug function to show status
+      function updateDebug() {
+        if (!debugEnabled) return;
+
+        const debugInfo = document.getElementById('debugInfo');
+        if (!debugInfo) return;
+
+        let info = '';
+        if (player) {
+          const controls = player.getControls();
+          info += `Controls enabled: ${controls ? controls.enabled : 'null'}<br>`;
+          info += `Player position: ${player.sphereBody ? 
+                   Math.round(player.sphereBody.position.x) + ', ' + 
+                   Math.round(player.sphereBody.position.y) + ', ' + 
+                   Math.round(player.sphereBody.position.z) : 'null'}<br>`;
+
+          // Add character animation info
+          if (player.characterManager) {
+            info += `Animation: ${player.characterManager.currentAnimation}<br>`;
+            info += `Moving: ${player.characterManager.isMoving ? 'Yes' : 'No'}<br>`;
+          }
+        }
+
+        debugInfo.innerHTML = info;
+      }
+
+
+function initAudio() {
+  // Create an audio listener and add it to the camera
+  const listener = new THREE.AudioListener();
+  camera.add(listener);
+
+  // Create a global audio source
+  backgroundMusic = new THREE.Audio(listener);
+
+  // Load the audio file
+  const audioLoader = new THREE.AudioLoader();
+  audioLoader.load(
+    '/assets/Vertinski-Big_Pit_Theme.mp3',
+    function(buffer) {
+      backgroundMusic.setBuffer(buffer);
+      backgroundMusic.setLoop(true);
+      backgroundMusic.setVolume(0.4);
+      console.log("Audio loaded, waiting for user to unmute");
+    },
+    undefined, // Optional progress callback
+    function(error) {
+      console.error("Error loading audio file:", error);
+    }
+  );
+}
+
+// Function to start audio playback
+function startAudio() {
+  if (backgroundMusic && !backgroundMusic.isPlaying) {
+    backgroundMusic.play()
+      .then(() => {
+        console.log("Background music started");
+      })
+      .catch((error) => {
+        console.error("Error playing audio:", error);
+      });
+  }
+}
+
+// Add event listener to the unmute button
+const unmuteButton = document.getElementById('unmuteButton');
+unmuteButton.addEventListener('click', function() {
+  startAudio();
+  // Optional: Hide or disable the button after clicking
+  unmuteButton.style.display = 'none'; // Hides the button
+  // Or: unmuteButton.disabled = true; // Disables the button
+});
+
+
+      // Initialize the game
+      init();
+
+      // Main initialization function
+      async function init() {
+        try {
+          console.log("Starting game initialization sequence...");
+
+          // Create loading manager to track asset loading
+          const loadingManager = new THREE.LoadingManager(
+            // Callback when everything is loaded
+            () => {
+              console.log("LoadingManager: All resources loaded, calling startGame()");
+              startGame();
+            },
+            // Progress callback
+            (url, itemsLoaded, itemsTotal) => {
+              console.log(`LoadingManager: Loading ${url}: ${itemsLoaded}/${itemsTotal}`);
+            },
+            // Error callback
+            (url) => {
+              console.error(`LoadingManager: Error loading ${url}`);
+            }
+          );
+
+          // Initialize Three.js setup
+          console.log("Initializing Three.js setup...");
+          initThree();
+          console.log("Three.js setup complete");
+
+          // add physics debugger
+          physicsDebugger = new PhysicsDebugger(scene);
+          window.physicsDebugger = physicsDebugger; 
+
+          // Start loading required resources
+          console.log("Starting to load required modules...");
+          await loadRequiredModules(loadingManager);
+          console.log("Required modules loaded, manually calling startGame() as a fallback");
+
+          // Directly call startGame as a fallback in case loadingManager's onLoad doesn't trigger
+          startGame();
+        } catch (error) {
+          console.error("Failed to initialize game:", error);
+          console.error("Error stack:", error.stack);
+          loading.innerHTML = `<span>Error: ${error.message}</span><br><span>Check console for details</span>`;
+          loading.style.display = 'none';
+        }
+      }
+
+      // Load required modules
+      async function loadRequiredModules(loadingManager) {
+        // Load Three.js and other modules as needed
+        // This would include loading character-related modules
+        console.log("Loading required modules...");
+
+        try {
+          console.log("Testing imports for CharacterBuilder and AnimationController...");
+          // Test if we can import the character modules
+          const characterModuleTest = await import('/static/CharacterBuilder.js')
+            .catch(error => {
+              console.error("Failed to import CharacterBuilder.js:", error);
+              throw error;
+            });
+
+          console.log("CharacterBuilder import successful:", characterModuleTest);
+
+          const animationModuleTest = await import('/static/AnimationController.js')
+            .catch(error => {
+              console.error("Failed to import AnimationController.js:", error);
+              throw error;
+            });
+
+          console.log("AnimationController import successful:", animationModuleTest);
+
+          // Test CharacterManager import
+          const characterManagerTest = await import('/static/CharacterManager.js')
+            .catch(error => {
+              console.error("Failed to import CharacterManager.js:", error);
+              throw error;
+            });
+
+          console.log("CharacterManager import successful:", characterManagerTest);
+
+          console.log("All required modules imported successfully!");
+          return Promise.resolve();
+        } catch (error) {
+          console.error("Error loading required modules:", error);
+          loading.innerHTML = `<span>Error loading modules: ${error.message}</span><br><span>Check console for details</span>`;
+          throw error;
+        }
+      }
+
+      // Start the game after resources are loaded
+      async function startGame() {
+        try {
+          console.log("Starting game initialization...");
+
+          // Create world manager and initialize physics
+          console.log("Creating WorldManager...");
+          worldManager = new WorldManager(scene);
+          console.log("Initializing physics...");
+          const world = worldManager.initPhysics();
+          console.log("Physics initialized successfully");
+
+          // Set up lighting
+          console.log("Setting up lighting...");
+          worldManager.setupLighting();
+          console.log("Lighting setup complete");
+
+          // Load terrain
+          console.log("Loading terrain...");
+          await worldManager.loadTerrain();
+          console.log("Terrain loaded successfully");
+
+          // Initialize player
+          console.log("Creating player...");
+          player = new Player(camera, scene, world, worldManager.getMaterial('physics'));
+          console.log("Initializing player...");
+          try {
+            player.init();
+            console.log("Player initialized successfully");
+
+            worldManager.physicsDebugger = physicsDebugger;
+            worldManager.playerBody = player.sphereBody; // Reference to player body for collision filtering
+
+          } catch (playerError) {
+            console.error("Error initializing player:", playerError);
+            console.error("Player initialization stack:", playerError.stack);
+            throw playerError;
+          }
+
+          // Initialize game objects
+          console.log("Creating game objects...");
+          gameObjects = new GameObjects(scene, world, worldManager.getMaterial('physics'));
+          console.log("Initializing game objects...");
+          gameObjects.init();
+          console.log("Game objects initialized successfully");
+
+          initMushroomSystem();
+
+          // Check if the user came from a portal
+          const urlParams = new URLSearchParams(window.location.search);
+          const cameFromPortal = urlParams.has('portal') && urlParams.get('portal') === 'true';
+
+          // If coming from a portal, skip instructions screen
+          if (cameFromPortal) {
+            console.log("Player arrived through a portal - skipping intro screens");
+
+            // Hide loading and instructions immediately
+            loading.style.display = 'none';
+            instructions.style.display = 'none';
+
+            // Auto-enable controls
+            if (player && player.controls) {
+              player.controls.lock();
+            }
+
+            // Start sound if portal parameter present
+            if (backgroundMusic) {
+              startAudio();
+            }
+            
+            // Apply any player customizations from URL params
+            if (player) {
+              const username = urlParams.get('username');
+              const color = urlParams.get('color');
+              const speed = urlParams.get('speed');
+              
+              // Apply color to character if provided
+              if (color && player.characterManager) {
+                try {
+                  // Convert color name or hex to RGB
+                  const colorObj = new THREE.Color(color);
+                  player.characterManager.params.colors.head = '#' + colorObj.getHexString();
+                  player.characterManager.params.colors.torso = '#' + colorObj.getHexString();
+                  
+                  // Recreate character with new colors
+                  player.characterManager.init();
+                } catch (e) {
+                  console.warn("Invalid color format:", color);
+                }
+              }
+              
+              // Could apply other customizations here
+              console.log(`Portal player data: username=${username}, color=${color}, speed=${speed}`);
+            }
+          } else {
+            // Regular flow for new players
+            // Start the game loop
+            console.log("Game initialized successfully, starting animation loop");
+
+            // Hide loading screen and show instructions
+            loading.style.display = 'none';
+            instructions.style.display = '';
+          }
+
+          animate();
+        } catch (error) {
+          console.error("Failed to start game:", error);
+          console.error("Error stack:", error.stack);
+          loading.innerHTML = `<span>Error: ${error.message}</span><br><span>Check console for details</span>`;
+        }
+      }
+
+      // Initialize Three.js setup
+      function initThree() {
+        // Initialize scene
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+        scene.fog = new THREE.FogExp2(0x87CEEB, 0.004);
+
+        // Initialize camera
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+        // Initialize renderer
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(scene.fog.color);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        // Initialize stats
+        stats = new Stats();
+        document.body.appendChild(stats.dom);
+
+        // Handle window resizing
+        window.addEventListener('resize', onWindowResize);
+
+        initAudio();
+      }
+
+      // Handle window resizing
+      function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+
+      function initMushroomSystem() {
+        console.log("Initializing mushroom system...");
+
+        // Reset timers
+        lastMushroomSpawnTime = performance.now();
+        nextMushroomSpawnInterval = getRandomSpawnInterval();
+
+        console.log("Mushroom system initialized, first spawn in", nextMushroomSpawnInterval/1000, "seconds");
+      }
+
+
+// Get a random interval for mushroom spawning
+function getRandomSpawnInterval() {
+  return mushroomSystem.minSpawnInterval + 
+         Math.random() * (mushroomSystem.maxSpawnInterval - mushroomSystem.minSpawnInterval);
+}
+
+// Update mushroom spawning logic in the animation loop
+function updateMushrooms(time) {
+  if (!mushroomSystem.enabled || !gameObjects) return;
+
+  // Check if it's time to try spawning a mushroom
+  const elapsedTime = time - lastMushroomSpawnTime;
+
+  if (elapsedTime >= nextMushroomSpawnInterval) {
+    // Reset timer
+    lastMushroomSpawnTime = time;
+    nextMushroomSpawnInterval = getRandomSpawnInterval();
+
+    // Random chance to actually spawn
+    if (Math.random() < mushroomSystem.spawnChance) {
+      // Try to spawn a mushroom
+      const mushroom = gameObjects.spawnRandomMushroom(worldManager.terrainMeshes);
+
+      if (mushroom) {
+        console.log("Spawned mushroom, next spawn in", nextMushroomSpawnInterval/1000, "seconds");
+      } else {
+        console.log("Failed to spawn mushroom, trying again in", nextMushroomSpawnInterval/1000, "seconds");
+      }
+    } else {
+      console.log("Skipped mushroom spawn, next chance in", nextMushroomSpawnInterval/1000, "seconds");
+    }
+  }
+}
+
+// Add the mushroom collision check to player update
+function checkPlayerMushroomCollisions() {
+  if (player && gameObjects) {
+    player.checkMushroomCollisions(gameObjects);
+  }
+}
+
+
+      // Portal variables
+      let portalCheckCooldown = 0;
+      let portalTransitionActive = false;
+      
+      // Main animation loop
+      function animate() {
+        requestAnimationFrame(animate);
+
+        // Calculate time delta
+        const time = performance.now() / 1000;
+        const dt = time - lastCallTime;
+        lastCallTime = time;
+
+        // step the physics world
+        worldManager.step(timeStep, dt);
+
+        // Always update player with scene lighting data
+        if (player) {
+          // Get lighting parameters from the world manager if available
+          let lightParams = null;
+
+          if (worldManager && worldManager.sunLight) {
+            lightParams = {
+              lightPosition: worldManager.sunLight.position.clone(),
+              lightColor: worldManager.sunLight.color.clone(),
+              lightIntensity: worldManager.sunLight.intensity,
+              // Get ambient light data if available, or use defaults
+              ambientColor: scene.background ? new THREE.Color(scene.background).multiplyScalar(0.3) : new THREE.Color(0x404040),
+              ambientIntensity: 0.3
+            };
+          }
+
+          // Pass lighting parameters to player update method
+          player.update(dt, lightParams);
+        }
+
+        // Update game objects if they exist
+        if (gameObjects) {
+          gameObjects.update();
+          
+          // Check for portal collisions (with cooldown to avoid excessive checks)
+          portalCheckCooldown -= dt;
+          if (portalCheckCooldown <= 0) {
+            checkPortalCollisions();
+            portalCheckCooldown = 0.2; // Check every 200ms
+          }
+        }
+
+        // Update debug info
+        updateDebug();
+
+
+        // Update physics debug visualization
+        if (physicsDebugger && physicsDebugger.enabled && player) {
+          // Visualize the player's physics body
+          physicsDebugger.visualizeBody(player.sphereBody, "player", {
+            bodyColor: 0x00aaff,
+            bodyOpacity: 0.4,
+            axisLength: 3
+          });
+
+        // Show the player's front direction (where "forward" should be)
+        physicsDebugger.showPlayerFrontDirection(player, camera);
+
+        // Visualize the ground normal under the player
+        physicsDebugger.visualizeGroundNormal(player);
+
+        // Add actual movement direction
+        if (player.moveForward || player.moveBackward || player.moveLeft || player.moveRight) {
+          const moveDir = player.getMovementDirection();
+          const position = new THREE.Vector3().copy(player.sphereBody.position);
+          physicsDebugger.updateDebugVector(position, moveDir, 4, "movement_input");
+        } else {
+          // Hide the vector when not moving
+          physicsDebugger.updateDebugVector(
+            new THREE.Vector3().copy(player.sphereBody.position), 
+            new THREE.Vector3(0, 0, 0), 
+            0, 
+            "movement_input"
+          );
+         }
+        }
+
+
+// Update mushroom spawning
+updateMushrooms(performance.now());
+
+// Check for player collecting mushrooms
+checkPlayerMushroomCollisions();
+
+
+        // Render the scene
+        renderer.render(scene, camera);
+        stats.update();
+      }
+    </script>
+
+<a target="_blank" href="https://jam.pieter.com" style="font-family: 'system-ui', sans-serif; position: fixed; bottom: -1px; right: -1px; padding: 7px; font-size: 14px; font-weight: bold; background: #fff; color: #000; text-decoration: none; z-index: 10; border-top-left-radius: 12px; z-index: 10000; border: 1px solid #fff;">🕹️ Vibe Jam 2025</a>
+
+<div id="deathScreen" style="
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.9);
+    z-index: 2000;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    font-family: 'Times New Roman', serif;
+    color: #a10000;
+    cursor: pointer;
+">
+    <div style="
+        font-size: 64px;
+        letter-spacing: 8px;
+        text-shadow: 0px 0px 10px #ff0000;
+        margin-bottom: 40px;
+        font-weight: bold;
+        transform: translateY(-20px);
+    ">
+        YOU DYED!
+    </div>
+    <div style="
+        font-size: 24px;
+        letter-spacing: 3px;
+        color: #8a8a8a;
+    ">
+        Click anywhere to continue...
+    </div>
+</div>
+
+<script>
+  // Functions for portal collision and transitions
+  function checkPortalCollisions() {
+    if (!gameObjects || !player || !player.enabled || portalTransitionActive) return;
+
+    // Check if player has entered a portal
+    const enteredPortal = gameObjects.checkPortalCollisions(player);
+
+    if (enteredPortal) {
+      console.log("Player entered portal:", enteredPortal.params.type);
+
+      // Get current player data
+      const playerData = {
+        username: player.playerName || "Player",
+        color: player.characterManager ? 
+               player.characterManager.params.colors.head.replace('#', '') : 
+               "ffffff",
+        speed: player.speedMultiplier ? player.speedMultiplier * 5 : 5
+      };
+
+      // Get destination URL with parameters
+      const destinationUrl = enteredPortal.getDestinationUrl(playerData);
+
+      // Start portal transition
+      portalTransitionActive = true;
+
+      // Add visual effect before teleporting
+      addPortalTransitionEffect();
+
+      // Schedule the actual teleport
+      setTimeout(() => {
+        window.location.href = destinationUrl;
+      }, 1000);
+    }
+  }
+
+  function addPortalTransitionEffect() {
+    // Create a full-screen overlay that fades to white
+    const overlay = document.createElement('div');
+    overlay.style.position = 'fixed';
+    overlay.style.top = '0';
+    overlay.style.left = '0';
+    overlay.style.width = '100vw';
+    overlay.style.height = '100vh';
+    overlay.style.backgroundColor = '#ffffff';
+    overlay.style.opacity = '0';
+    overlay.style.transition = 'opacity 1s ease-in';
+    overlay.style.zIndex = '1000';
+    document.body.appendChild(overlay);
+
+    // Start fade in
+    setTimeout(() => {
+      overlay.style.opacity = '1';
+    }, 50);
+
+    // Optional: Add a portal sound effect
+    if (backgroundMusic) {
+      // Fade out current music
+      const fadeOutInterval = setInterval(() => {
+        if (backgroundMusic.volume > 0.05) {
+          backgroundMusic.volume -= 0.05;
+        } else {
+          clearInterval(fadeOutInterval);
+          backgroundMusic.volume = 0;
+        }
+      }, 50);
+    }
+  }
+</script>
+  </body>
+</html>
